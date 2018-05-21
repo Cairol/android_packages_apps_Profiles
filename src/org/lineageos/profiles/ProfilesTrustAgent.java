@@ -147,127 +147,6 @@ public class ProfilesTrustAgent extends TrustAgentService {
         }
     }
 
-    private boolean shouldGrantTrustOnTriggerStateChanged(String triggerId, int triggerType,
-            int triggerState) {
-        final Profile activeProfile = mProfileManager.getActiveProfile();
-        if (activeProfile != null) {
-            final int lockMode = activeProfile.getScreenLockMode().getValue();
-            if (lockMode == Profile.LockMode.INSECURE) {
-                final List<Profile.ProfileTrigger> wifiTriggers
-                        = activeProfile.getTriggersFromType(Profile.TriggerType.WIFI);
-                final List<Profile.ProfileTrigger> btTriggers
-                        = activeProfile.getTriggersFromType(Profile.TriggerType.BLUETOOTH);
-                Set<String> onWiFiConnect = new ArraySet<>();
-                Set<String> onBTConnect = new ArraySet<>();
-
-                for (Profile.ProfileTrigger trigger : wifiTriggers) {
-                    if (trigger.getState() == Profile.TriggerState.ON_CONNECT) {
-                        onWiFiConnect.add(trigger.getId());
-                    }
-                }
-                for (Profile.ProfileTrigger trigger : btTriggers) {
-                    if (trigger.getState() == Profile.TriggerState.ON_CONNECT) {
-                        onBTConnect.add(trigger.getId());
-                    }
-                }
-
-                if (triggerState == Profile.TriggerState.ON_DISCONNECT) {
-                    if (triggerType == Profile.TriggerType.BLUETOOTH
-                            && onWiFiConnect.contains(getActiveSSID())) {
-                        return true;
-                    }
-
-                    BluetoothAdapter mBluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
-                    Set<BluetoothDevice> pairedDevices = mBluetoothAdapter.getBondedDevices();
-                    Set<String> connectedBTDevices = new ArraySet<>();
-                    for (BluetoothDevice device : pairedDevices) {
-                        if (device.isConnected()) connectedBTDevices.add(device.getAddress());
-                    }
-                    for (Profile.ProfileTrigger btTrigger : btTriggers) {
-                        if (connectedBTDevices.contains(btTrigger.getId())
-                                && btTrigger.getState() == Profile.TriggerState.ON_CONNECT) {
-                            return true;
-                        }
-                    }
-                } else if (triggerState == Profile.TriggerState.ON_CONNECT
-                        && (onWiFiConnect.contains(triggerId) || onBTConnect.contains(triggerId))) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private boolean shouldGrantTrustOnCreate() {
-        final Profile activeProfile = mProfileManager.getActiveProfile();
-        if (activeProfile != null) {
-            final int lockMode = activeProfile.getScreenLockMode().getValue();
-            if (lockMode == Profile.LockMode.INSECURE) {
-                final String ssid = getActiveSSID();
-                for (Profile.ProfileTrigger trigger
-                        : activeProfile.getTriggersFromType(Profile.TriggerType.WIFI)) {
-                    if (trigger.getId().equals(ssid)
-                            && trigger.getState() == Profile.TriggerState.ON_CONNECT) {
-                        return true;
-                    }
-                }
-                BluetoothAdapter mBluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
-                Set<BluetoothDevice> pairedDevices = mBluetoothAdapter.getBondedDevices();
-                Set<String> connectedBTDevices = new ArraySet<>();
-                for (BluetoothDevice device : pairedDevices) {
-                    if (device.isConnected()) connectedBTDevices.add(device.getAddress());
-                }
-                for (Profile.ProfileTrigger trigger
-                        : activeProfile.getTriggersFromType(Profile.TriggerType.BLUETOOTH)) {
-                    if (connectedBTDevices.contains(trigger.getId())
-                            && trigger.getState() == Profile.TriggerState.ON_CONNECT) {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
-    }
-
-    private String getActiveSSID() {
-        final WifiManager wifiManager = getSystemService(WifiManager.class);
-        WifiInfo wifiinfo = wifiManager.getConnectionInfo();
-        if (wifiinfo == null) {
-            return null;
-        }
-        WifiSsid ssid = wifiinfo.getWifiSsid();
-        if (ssid == null) {
-            return null;
-        }
-        return ssid.toString();
-    }
-
-    private void onTrustAgentCreated() {
-        // Check if we connected to a tracking WiFi network/BT device before this agent was created.
-        // The agent is created AFTER the user authenticates at boot or when a new lock screen
-        // (PIN, pattern, etc) is set
-        final Profile p = mProfileManager.getActiveProfile();
-        if (p != null && shouldGrantTrustOnCreate()) {
-            if (DEBUG) Log.w(TAG, "granting trust for profile " + p.getName());
-            grantTrust(getString(R.string.trust_by_profile), GRANT_DURATION_MS, false);
-        } else {
-            if (DEBUG) Log.w(TAG, "revoking trust.");
-            revokeTrust();
-        }
-    }
-
-    private void onTriggerStateChanged(String triggerId, int triggerType, int triggerState) {
-        final Profile p = mProfileManager.getActiveProfile();
-        if (p != null
-                && shouldGrantTrustOnTriggerStateChanged(triggerId, triggerType, triggerState)) {
-            if (DEBUG) Log.w(TAG, "granting trust for profile " + p.getName());
-            grantTrust(getString(R.string.trust_by_profile), GRANT_DURATION_MS, false);
-        } else {
-            if (DEBUG) Log.w(TAG, "revoking trust.");
-            revokeTrust();
-        }
-    }
-
     private static class ProfileHandler extends Handler {
         private final WeakReference<ProfilesTrustAgent> mService;
 
@@ -278,29 +157,13 @@ public class ProfilesTrustAgent extends TrustAgentService {
         @Override
         public void handleMessage(Message msg) {
             switch (msg.what) {
+                case MSG_ON_AGENT_CREATED:
+                case MSG_ON_USER_SWITCH:
+                case MSG_ON_TRIGGER_STATE_CHANGED:
                 case MSG_UPDATE_STATE: {
                     ProfilesTrustAgent service = mService.get();
                     if (service != null) {
                         service.handleApplyCurrentProfileState();
-                    }
-                    break;
-                }
-                case MSG_ON_USER_SWITCH:
-                case MSG_ON_AGENT_CREATED: {
-                    ProfilesTrustAgent service = mService.get();
-                    if (service != null) {
-                        service.onTrustAgentCreated();
-                    }
-                    break;
-                }
-                case MSG_ON_TRIGGER_STATE_CHANGED: {
-                    ProfilesTrustAgent service = mService.get();
-                    if (service != null && msg.obj != null) {
-                        Bundle bundle = (Bundle) msg.obj;
-                        final String id = bundle.getString(ProfileManager.EXTRA_TRIGGER_ID);
-                        final int type = bundle.getInt(ProfileManager.EXTRA_TRIGGER_TYPE);
-                        final int state = bundle.getInt(ProfileManager.EXTRA_TRIGGER_STATE);
-                        service.onTriggerStateChanged(id, type, state);
                     }
                     break;
                 }
